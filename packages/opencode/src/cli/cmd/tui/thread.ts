@@ -9,6 +9,8 @@ import { errorMessage } from "@/util/error"
 import { withTimeout } from "@/util/timeout"
 import { withNetworkOptions, resolveNetworkOptionsNoConfig } from "@/cli/network"
 import { Filesystem } from "@/util/filesystem"
+import { ServerAuth } from "@/server/auth"
+import { ServerDiscovery } from "@/cli/server-discovery"
 import type { GlobalEvent } from "@opencode-ai/sdk/v2"
 import type { EventSource } from "./context/sdk"
 import { win32DisableProcessedInput, win32InstallCtrlCGuard } from "./win32"
@@ -197,18 +199,46 @@ export const TuiThreadCommand = cmd({
         network.mdns ||
         network.port !== 0 ||
         network.hostname !== "127.0.0.1"
+      const discovered = external ? undefined : await ServerDiscovery.find()
+      const remote = external ? await client.call("server", network) : undefined
+      const remoteURL =
+        remote && typeof remote === "object" && "url" in remote && typeof remote.url === "string" ? remote.url : undefined
+      if (external && !remoteURL) {
+        UI.error("Failed to start server")
+        process.exitCode = 1
+        return
+      }
 
-      const transport = external
-        ? {
-            url: (await client.call("server", network)).url,
+      const transport = (() => {
+        if (external) {
+          if (!remoteURL) return
+          return {
+            url: remoteURL,
             fetch: undefined,
+            headers: ServerAuth.headers(),
             events: undefined,
           }
-        : {
-            url: "http://opencode.internal",
-            fetch: createWorkerFetch(client),
-            events: createEventSource(client),
+        }
+        if (discovered) {
+          return {
+            url: discovered,
+            fetch: undefined,
+            headers: ServerAuth.headers(),
+            events: undefined,
           }
+        }
+        return {
+          url: "http://opencode.internal",
+          fetch: createWorkerFetch(client),
+          headers: undefined,
+          events: createEventSource(client),
+        }
+      })()
+      if (!transport) {
+        UI.error("Failed to start server")
+        process.exitCode = 1
+        return
+      }
 
       try {
         await validateSession({
@@ -216,6 +246,7 @@ export const TuiThreadCommand = cmd({
           sessionID: args.session,
           directory: cwd,
           fetch: transport.fetch,
+          headers: transport.headers,
         })
       } catch (error) {
         UI.error(errorMessage(error))
@@ -241,6 +272,7 @@ export const TuiThreadCommand = cmd({
           config,
           directory: cwd,
           fetch: transport.fetch,
+          headers: transport.headers,
           events: transport.events,
           args: {
             continue: args.continue,
